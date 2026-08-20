@@ -3,6 +3,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 use std::{
+    io::Write,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
 };
@@ -36,6 +37,19 @@ pub fn inner_main(args: args::Cli) -> anyhow::Result<Value> {
         "warn"
     };
     let mut builder = env_logger::Builder::from_env(Env::default().default_filter_or(directive));
+
+    // Timestamps no fuso local (variavel de ambiente TZ), em vez do UTC fixo do env_logger.
+    builder.format(|buf, record| {
+        let level_style = buf.default_level_style(record.level());
+        writeln!(
+            buf,
+            "[{} {level_style}{:<5}{level_style:#} {}] {}",
+            chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z"),
+            record.level(),
+            record.target(),
+            record.args()
+        )
+    });
 
     match builder.try_init() {
         Ok(_) => log::info!("logging initialized"),
