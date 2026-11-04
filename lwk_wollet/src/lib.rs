@@ -112,6 +112,7 @@ mod pos;
 mod pset_create;
 #[cfg(feature = "registry")]
 pub mod registry;
+pub mod sponsor;
 mod tx_builder;
 mod update;
 mod util;
@@ -139,6 +140,7 @@ pub use crate::tx_details::{TxDetails, TxOpt, TxOutDetails, TxsOpt};
 pub use crate::wollet::DirectoryIdHash;
 
 // Re-export store types from lwk_common
+pub use crate::sponsor::{SponsorOutput, SponsorOutputKind, SponsorPrepared, UtxoSecrets};
 pub use crate::tx_builder::{BuiltTx, TxBuilder, WolletTxBuilder};
 pub use crate::update::{DownloadTxResult, Update};
 pub use crate::util::EC;

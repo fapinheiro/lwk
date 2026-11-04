@@ -533,6 +533,34 @@ impl Client {
         self.make_request(Method::SignerJadeId, Some(req))
     }
 
+    pub fn wallet_utxo_secrets(
+        &self,
+        name: String,
+        txid: String,
+        vout: u32,
+    ) -> Result<response::WalletUtxoSecrets, Error> {
+        let req = request::WalletUtxoSecrets { name, txid, vout };
+        self.make_request(Method::WalletUtxoSecrets, Some(req))
+    }
+
+    pub fn wallet_sponsor_prepare(
+        &self,
+        name: String,
+        pset: String,
+        txid: String,
+        vout: u32,
+        deposit_address: String,
+    ) -> Result<response::WalletSponsorPrepare, Error> {
+        let req = request::WalletSponsorPrepare {
+            name,
+            pset,
+            txid,
+            vout,
+            deposit_address,
+        };
+        self.make_request(Method::WalletSponsorPrepare, Some(req))
+    }
+
     pub fn scan(&self) -> Result<Value, Error> {
         self.make_request(Method::Scan, None::<Box<RawValue>>)
     }

@@ -2760,6 +2760,7 @@ name = "lwk_cli"
 version = "0.18.1"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "clap_complete",
  "ctrlc",

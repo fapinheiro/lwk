@@ -68,6 +68,8 @@ pub enum Method {
     Amp2Descriptor,
     Amp2Register,
     Amp2Cosign,
+    WalletUtxoSecrets,
+    WalletSponsorPrepare,
 }
 impl Method {
     pub(crate) fn schema(&self, direction: request::Direction) -> Result<Value, serde_json::Error> {
@@ -127,6 +129,8 @@ impl Method {
                 Method::Amp2Descriptor => schema_for!(request::Amp2Descriptor),
                 Method::Amp2Register => schema_for!(request::Amp2Register),
                 Method::Amp2Cosign => schema_for!(request::Amp2Cosign),
+                Method::WalletUtxoSecrets => schema_for!(request::WalletUtxoSecrets),
+                Method::WalletSponsorPrepare => schema_for!(request::WalletSponsorPrepare),
             },
             Direction::Response => match self {
                 Method::Schema => return serde_json::from_str(include_str!("../schema.json")),
@@ -183,6 +187,8 @@ impl Method {
                 Method::Amp2Descriptor => schema_for!(response::Amp2Descriptor),
                 Method::Amp2Register => schema_for!(response::Amp2Register),
                 Method::Amp2Cosign => schema_for!(response::Amp2Cosign),
+                Method::WalletUtxoSecrets => schema_for!(response::WalletUtxoSecrets),
+                Method::WalletSponsorPrepare => schema_for!(response::WalletSponsorPrepare),
             },
         })
     }
@@ -245,6 +251,8 @@ impl FromStr for Method {
             "amp2_descriptor" => Method::Amp2Descriptor,
             "amp2_register" => Method::Amp2Register,
             "amp2_cosign" => Method::Amp2Cosign,
+            "wallet_utxo_secrets" => Method::WalletUtxoSecrets,
+            "wallet_sponsor_prepare" => Method::WalletSponsorPrepare,
             _ => {
                 return Err(MethodNotExist {
                     name: s.to_string(),
@@ -309,6 +317,8 @@ impl std::fmt::Display for Method {
             Method::Amp2Descriptor => "amp2_descriptor",
             Method::Amp2Register => "amp2_register",
             Method::Amp2Cosign => "amp2_cosign",
+            Method::WalletUtxoSecrets => "wallet_utxo_secrets",
+            Method::WalletSponsorPrepare => "wallet_sponsor_prepare",
         };
         write!(f, "{s}")
     }

@@ -586,6 +586,77 @@ impl std::fmt::Display for WalletType {
     }
 }
 
+/// Response for `wallet_utxo_secrets`
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct WalletUtxoSecrets {
+    /// Transaction ID
+    pub txid: String,
+
+    /// Output index
+    pub vout: u32,
+
+    /// Full origin transaction serialized as hex
+    pub tx_hex: String,
+
+    /// Script pubkey of the output as hex
+    pub script_pubkey: String,
+
+    /// Asset ID as hex
+    pub asset: String,
+
+    /// Asset blinding factor as hex
+    pub asset_bf: String,
+
+    /// Value in satoshi
+    pub value: u64,
+
+    /// Value blinding factor as hex
+    pub value_bf: String,
+
+    /// Block height, or null if unconfirmed
+    pub height: Option<u32>,
+
+    /// Maximum weight to satisfy the input script
+    pub max_weight_to_satisfy: u64,
+
+    /// Whether the wallet descriptor produces segwit outputs
+    pub is_segwit: bool,
+}
+
+/// A classified output of the sponsor PSET
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SponsorOutput {
+    /// Output index (0-based)
+    pub index: u32,
+
+    /// Script pubkey as hex
+    pub script_pubkey: String,
+
+    /// Output kind: "fee", "deposit", "mine", or "other"
+    pub kind: String,
+
+    /// For deposit outputs: whether the PSET blinding_key matches the deposit address.
+    /// null if the blinding_key field is absent in the PSET output.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blinding_key_matches: Option<bool>,
+}
+
+/// Response for `wallet_sponsor_prepare`
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct WalletSponsorPrepare {
+    /// The enriched PSET in base64 format
+    pub pset: String,
+
+    /// Transaction ID of the unsigned transaction
+    pub txid: String,
+
+    /// Total fee in satoshi
+    pub fee: u64,
+
+    /// Classified outputs
+    pub outputs: Vec<SponsorOutput>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

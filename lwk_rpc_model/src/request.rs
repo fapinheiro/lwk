@@ -556,6 +556,38 @@ pub struct Amp2Cosign {
     pub pset: String,
 }
 
+/// Get blinding secrets for a specific unspent UTXO owned by a wallet
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct WalletUtxoSecrets {
+    /// The wallet name
+    pub name: String,
+
+    /// Transaction ID of the UTXO
+    pub txid: String,
+
+    /// Output index of the UTXO
+    pub vout: u32,
+}
+
+/// Validate and enrich a sponsor PSET
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct WalletSponsorPrepare {
+    /// The sponsor wallet name
+    pub name: String,
+
+    /// The PSET in base64 format
+    pub pset: String,
+
+    /// Transaction ID of the reserved sponsor UTXO
+    pub txid: String,
+
+    /// Output index of the reserved sponsor UTXO
+    pub vout: u32,
+
+    /// Confidential deposit address (recipient of the asset transfer)
+    pub deposit_address: String,
+}
+
 #[cfg(test)]
 mod test {
     use schemars::schema_for;

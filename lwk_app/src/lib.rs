@@ -45,6 +45,7 @@ use lwk_wollet::registry::add_contracts;
 use lwk_wollet::LiquidexProposal;
 use lwk_wollet::WolletDescriptor;
 use lwk_wollet::{TxOpt, TxsOpt};
+use lwk_wollet::sponsor::SponsorOutputKind;
 use lwk_wollet::{Wollet, WolletBuilder};
 use serde_json::Value;
 
@@ -1409,6 +1410,63 @@ fn inner_method_handler(request: Request, state: Arc<Mutex<State>>) -> Result<Re
             Response::result(
                 request.id,
                 serde_json::to_value(response::Amp2Cosign { pset })?,
+            )
+        }
+        Method::WalletUtxoSecrets => {
+            let r: request::WalletUtxoSecrets = serde_json::from_value(params)?;
+            let mut s = state.lock()?;
+            let wollet = s.wollets.get_mut(&r.name)?;
+            let txid = Txid::from_str(&r.txid)?;
+            let outpoint = OutPoint::new(txid, r.vout);
+            let secrets = wollet.utxo_secrets(outpoint)?;
+            Response::result(
+                request.id,
+                serde_json::to_value(response::WalletUtxoSecrets {
+                    txid: secrets.txid.to_string(),
+                    vout: secrets.vout,
+                    tx_hex: secrets.tx_hex,
+                    script_pubkey: secrets.script_pubkey.to_hex(),
+                    asset: secrets.asset.to_string(),
+                    asset_bf: secrets.asset_bf.to_string(),
+                    value: secrets.value,
+                    value_bf: secrets.value_bf.to_string(),
+                    height: secrets.height,
+                    max_weight_to_satisfy: secrets.max_weight_to_satisfy as u64,
+                    is_segwit: secrets.is_segwit,
+                })?,
+            )
+        }
+        Method::WalletSponsorPrepare => {
+            let r: request::WalletSponsorPrepare = serde_json::from_value(params)?;
+            let mut s = state.lock()?;
+            let wollet = s.wollets.get_mut(&r.name)?;
+            let txid = Txid::from_str(&r.txid)?;
+            let outpoint = OutPoint::new(txid, r.vout);
+            let mut pset = PartiallySignedTransaction::from_str(&r.pset)?;
+            let prepared = wollet.sponsor_prepare(&mut pset, outpoint, &r.deposit_address)?;
+            let outputs = prepared
+                .outputs
+                .iter()
+                .map(|o| response::SponsorOutput {
+                    index: o.index as u32,
+                    script_pubkey: o.script_pubkey.to_hex(),
+                    kind: match o.kind {
+                        SponsorOutputKind::Fee => "fee".to_string(),
+                        SponsorOutputKind::Deposit => "deposit".to_string(),
+                        SponsorOutputKind::Mine => "mine".to_string(),
+                        SponsorOutputKind::Other => "other".to_string(),
+                    },
+                    blinding_key_matches: o.blinding_key_matches,
+                })
+                .collect();
+            Response::result(
+                request.id,
+                serde_json::to_value(response::WalletSponsorPrepare {
+                    pset: prepared.pset.to_string(),
+                    txid: prepared.txid.to_string(),
+                    fee: prepared.fee,
+                    outputs,
+                })?,
             )
         }
     };

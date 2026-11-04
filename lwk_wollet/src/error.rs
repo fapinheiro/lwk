@@ -301,6 +301,24 @@ pub enum Error {
 
     #[error("Async sleep failed: {0}")]
     AsyncSleepFailed(String),
+
+    #[error("SPONSOR_UTXO_NOT_FOUND: outpoint is not an unspent UTXO of this wallet")]
+    SponsorUtxoNotFound,
+
+    #[error("SPONSOR_DEPOSIT_ADDRESS_INVALID: address is invalid or belongs to a different network")]
+    SponsorDepositAddressInvalid,
+
+    #[error("SPONSOR_INPUT_MISMATCH: wallet inputs in PSET are not exactly the reserved outpoint")]
+    SponsorInputMismatch,
+
+    #[error("SPONSOR_SIGHASH_NOT_ALL: sighash type of the sponsor input is not SIGHASH_ALL")]
+    SponsorSighashNotAll,
+
+    #[error("SPONSOR_WITNESS_UTXO_MISMATCH: witness_utxo is absent or differs from the actual UTXO")]
+    SponsorWitnessUtxoMismatch,
+
+    #[error("SPONSOR_ISSUANCE_NOT_ALLOWED: issuance fields are set on the sponsor input")]
+    SponsorIssuanceNotAllowed,
 }
 
 // cannot derive automatically with this error because of trait bound
