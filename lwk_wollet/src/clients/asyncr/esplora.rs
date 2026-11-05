@@ -77,6 +77,9 @@ pub struct EsploraClient {
     /// The cached token for authenticated services, it will be Some only when
     /// the token provider is `TokenProvider::Blockstream`
     token: Mutex<Option<String>>,
+
+    /// Maximum size in bytes of a response body
+    max_response_size: usize,
 }
 
 impl EsploraClient {
@@ -91,7 +94,7 @@ impl EsploraClient {
 
     pub(crate) async fn last_block_hash(&mut self) -> Result<elements::BlockHash, crate::Error> {
         let response = self.get_with_retry(&self.tip_hash_url).await?;
-        Ok(BlockHash::from_str(&response.text().await?)?)
+        Ok(BlockHash::from_str(&self.read_text(response).await?)?)
     }
 
     /// Async version of [`crate::blocking::BlockchainBackend::tip()`]
@@ -104,7 +107,7 @@ impl EsploraClient {
     async fn header(&mut self, last_block_hash: BlockHash) -> Result<elements::BlockHeader, Error> {
         let header_url = format!("{}/block/{}/header", self.base_url, last_block_hash);
         let response = self.get_with_retry(&header_url).await?;
-        let header_bytes = Vec::<u8>::from_hex(&response.text().await?)?;
+        let header_bytes = Vec::<u8>::from_hex(&self.read_text(response).await?)?;
 
         let header = elements::BlockHeader::consensus_decode(&header_bytes[..])?;
         Ok(header)
@@ -119,7 +122,7 @@ impl EsploraClient {
 
         let tx_hex = tx.serialize().to_hex();
         let response = self.post_with_retry(&self.broadcast_url, &tx_hex).await?;
-        let text = response.text().await?;
+        let text = self.read_text(response).await?;
         let txid = elements::Txid::from_str(&text).map_err(|e| {
             crate::Error::Generic(format!(
                 "Failed to parse response to txid. Response: {text}, Error: {e}"
@@ -132,7 +135,7 @@ impl EsploraClient {
     pub async fn get_transaction(&self, txid: Txid) -> Result<elements::Transaction, Error> {
         let tx_url = format!("{}/tx/{}/raw", self.base_url, txid);
         let response = self.get_with_retry(&tx_url).await?;
-        let tx = elements::Transaction::consensus_decode(&response.bytes().await?[..])?;
+        let tx = elements::Transaction::consensus_decode(&self.read_body(response).await?[..])?;
 
         Ok(tx)
     }
@@ -165,13 +168,13 @@ impl EsploraClient {
                     None => {
                         let block_height = format!("{}/block-height/{}", self.base_url, height);
                         let response = self.get_with_retry(&block_height).await?;
-                        BlockHash::from_str(&response.text().await?)?
+                        BlockHash::from_str(&self.read_text(response).await?)?
                     }
                 };
 
                 let block_header = format!("{}/block/{}/header", self.base_url, block_hash);
                 let response = self.get_with_retry(&block_header).await?;
-                let header_bytes = Vec::<u8>::from_hex(&response.text().await?)?;
+                let header_bytes = Vec::<u8>::from_hex(&self.read_text(response).await?)?;
 
                 let header = elements::BlockHeader::consensus_decode(&header_bytes[..])?;
 
@@ -218,7 +221,7 @@ impl EsploraClient {
             let response = self.get_with_retry(&url).await?;
 
             // TODO going through string and then json is not as efficient as it could be but we prioritize debugging for now
-            let text = response.text().await?;
+            let text = self.read_text(response).await?;
             let json: Vec<EsploraTx> = match serde_json::from_str(&text) {
                 Ok(e) => e,
                 Err(e) => {
@@ -249,7 +252,7 @@ impl EsploraClient {
             );
             let response = self.get_with_retry(&url).await?;
             let status = response.status().as_u16();
-            let body = response.text().await?;
+            let body = self.read_text(response).await?;
 
             if status != 200 {
                 return Err(Error::Generic(body));
@@ -288,7 +291,7 @@ impl EsploraClient {
             );
             let response = self.get_with_retry(&url).await?;
             let status = response.status().as_u16();
-            let body = response.text().await?;
+            let body = self.read_text(response).await?;
 
             if status != 200 {
                 return Err(Error::Generic(body));
@@ -540,7 +543,7 @@ impl EsploraClient {
                 let url = format!("{}/v1/server_recipient", self.base_url);
                 let response = self.get_with_retry(&url).await?;
                 let status = response.status().as_u16();
-                let body = response.text().await?;
+                let body = self.read_text(response).await?;
                 if status != 200 {
                     return Err(Error::Generic(body));
                 }
@@ -640,7 +643,7 @@ impl EsploraClient {
             let response = self.get_with_retry(&full_url).await?;
 
             let status = response.status();
-            let body = response.text().await?;
+            let body = self.read_text(response).await?;
 
             if status != StatusCode::OK {
                 if status == StatusCode::UNPROCESSABLE_ENTITY && retry_count < MAX_RETRIES {
@@ -780,7 +783,7 @@ impl EsploraClient {
 
         let response = self.get_with_retry(&url).await?;
         let status = response.status();
-        let body = response.text().await?;
+        let body = self.read_text(response).await?;
 
         if status != StatusCode::OK {
             return Err(Error::Generic(body));
@@ -899,6 +902,29 @@ impl EsploraClient {
     }
 
     const MAX_HTTP_RETRIES: u32 = 6;
+
+    /// Read a response body, failing as soon as it exceeds the configured size.
+    ///
+    /// The size is counted as the body streams in, `Content-Length` is not trusted.
+    async fn read_body(&self, response: Response) -> Result<Vec<u8>, Error> {
+        let limit = self.max_response_size;
+        let mut body = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            if body.len() + chunk.len() > limit {
+                return Err(Error::ResponseTooLarge { limit });
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
+    }
+
+    /// Like [`Self::read_body`], for UTF-8 text responses.
+    async fn read_text(&self, response: Response) -> Result<String, Error> {
+        String::from_utf8(self.read_body(response).await?)
+            .map_err(|e| Error::Generic(format!("invalid response UTF-8: {e}")))
+    }
 
     async fn get_with_retry(&self, url: &str) -> Result<Response, Error> {
         let mut num_attempts = 0;
@@ -1117,6 +1143,7 @@ impl EsploraClientBuilder {
             requests: AtomicUsize::new(0),
             waterfalls_encrypted_descriptors: HashMap::new(),
             token_provider: self.token_provider,
+            max_response_size: self.max_response_size,
             #[cfg(not(target_arch = "wasm32"))]
             token: tokio::sync::Mutex::new(None),
             #[cfg(target_arch = "wasm32")]
@@ -1229,19 +1256,39 @@ fn encrypt(plaintext: &str, recipient: Recipient) -> Result<String, Error> {
     Ok(result)
 }
 
+/// Maximum number of characters of an error body kept in [`Error::EsploraHttpError`]
+const ERROR_BODY_MAX_CHARS: usize = 500;
+
 /// Builds an [`Error`] describing an unsuccessful HTTP response, including the
 /// status code and (a bounded prefix of) the response body so failures like an
 /// authenticated backend returning `402 Insufficient credits` are reported
 /// clearly rather than as a downstream JSON parsing error.
 async fn error_for_status(url: &str, response: Response) -> Error {
     let status = response.status().as_u16();
-    let body = response.text().await.unwrap_or_default();
-    let snippet: String = body.trim().chars().take(500).collect();
+    let body = read_error_body(response).await;
+    let snippet: String = body.trim().chars().take(ERROR_BODY_MAX_CHARS).collect();
     Error::EsploraHttpError {
         url: url.to_string(),
         status,
         body: (!snippet.is_empty()).then_some(snippet),
     }
+}
+
+/// Read the start of an error body, enough to fill the snippet even with 4-byte characters.
+///
+/// The rest of the body is never downloaded, so a server can't make us read a huge error body.
+async fn read_error_body(response: Response) -> String {
+    let limit = ERROR_BODY_MAX_CHARS * 4;
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while body.len() < limit {
+        match stream.next().await {
+            Some(Ok(chunk)) => body.extend_from_slice(&chunk),
+            _ => break,
+        }
+    }
+    body.truncate(limit);
+    String::from_utf8_lossy(&body).into_owned()
 }
 
 /// Fetches an OAuth2 access token using client credentials flow

@@ -26,6 +26,9 @@ pub mod asyncr;
 
 pub(crate) mod electrum_url;
 
+#[cfg(feature = "esplora")]
+const DEFAULT_MAX_RESPONSE_SIZE: usize = 64 * 1024 * 1024;
+
 /// A builder for the [`crate::clients::asyncr::EsploraClient`] or [`crate::clients::blocking::EsploraClient`]
 #[cfg(feature = "esplora")]
 #[derive(Debug, Clone)]
@@ -38,6 +41,7 @@ pub struct EsploraClientBuilder {
     timeout: Option<u8>,
     concurrency: Option<usize>,
     token_provider: TokenProvider,
+    max_response_size: usize,
 }
 
 /// Provider of a token for authenticated services backend of Esplora and Waterfalls
@@ -90,6 +94,7 @@ impl EsploraClientBuilder {
             timeout: None,
             concurrency: None,
             token_provider: TokenProvider::None,
+            max_response_size: DEFAULT_MAX_RESPONSE_SIZE,
         }
     }
 
@@ -144,6 +149,16 @@ impl EsploraClientBuilder {
     /// Set the token provider for authenticated services
     pub fn token_provider(mut self, token: TokenProvider) -> Self {
         self.token_provider = token;
+        self
+    }
+
+    /// Set the maximum size in bytes of a single response, default is 64 MiB.
+    ///
+    /// Requests whose response exceeds this size fail with
+    /// [`crate::Error::ResponseTooLarge`].
+    /// Increase it for wallets with a very large history.
+    pub fn max_response_size(mut self, max_response_size: usize) -> Self {
+        self.max_response_size = max_response_size;
         self
     }
 }
