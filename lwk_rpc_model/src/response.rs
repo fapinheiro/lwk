@@ -613,6 +613,10 @@ pub struct WalletUtxoSecrets {
     /// Value blinding factor as hex
     pub value_bf: String,
 
+    /// Private blinding key for the UTXO's script pubkey as 32-byte hex (slip77 derivation).
+    /// Used by the app to call `TxOut.unblind(key)` to build an `ExternalUtxo`.
+    pub blinding_key: String,
+
     /// Block height, or null if unconfirmed
     pub height: Option<u32>,
 
@@ -636,8 +640,7 @@ pub struct SponsorOutput {
     pub kind: String,
 
     /// For deposit outputs: whether the PSET blinding_key matches the deposit address.
-    /// null if the blinding_key field is absent in the PSET output.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// null if the blinding_key field is absent in the PSET output, or for non-deposit outputs.
     pub blinding_key_matches: Option<bool>,
 }
 

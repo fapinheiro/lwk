@@ -4548,3 +4548,241 @@ fn test_miniscript_and_threshold() {
     let balance_after = wallet.balance_btc();
     assert_eq!(balance_after, balance_before - satoshi - fee);
 }
+
+// ── FeeSponsor v1 integration tests ──────────────────────────────────────────
+
+/// Helper: convert a `UtxoSecrets` (from `utxo_secrets`) into an `ExternalUtxo`
+/// suitable for `TxBuilder::add_external_utxos`.
+fn external_utxo_from_secrets(secrets: lwk_wollet::sponsor::UtxoSecrets) -> ExternalUtxo {
+    let raw: Vec<u8> = Vec::from_hex(&secrets.tx_hex).unwrap();
+    let tx: Transaction = deserialize(&raw).unwrap();
+    let txout = tx.output[secrets.vout as usize].clone();
+    let tx_opt = if secrets.is_segwit { None } else { Some(tx) };
+    ExternalUtxo {
+        outpoint: OutPoint::new(secrets.txid, secrets.vout),
+        txout,
+        tx: tx_opt,
+        unblinded: elements::TxOutSecrets {
+            asset:    secrets.asset,
+            asset_bf: secrets.asset_bf,
+            value:    secrets.value,
+            value_bf: secrets.value_bf,
+        },
+        max_weight_to_satisfy: secrets.max_weight_to_satisfy,
+    }
+}
+
+/// Positive sponsor flow:
+/// - Wallet A (sponsor) has L-BTC; wallet B (user) has an issued asset but no L-BTC.
+/// - B builds a PSET spending the asset to C + A's UTXO as fee payer (L-BTC change back to A).
+/// - A validates via `sponsor_prepare` (applies `add_details`), then co-signs.
+/// - B signs its input, finalises, broadcasts → tx confirmed.
+/// Also verifies that txid is stable across signing rounds.
+#[test]
+fn test_sponsor_fee_flow() {
+    let env = TestEnvBuilder::from_env().with_electrum().build();
+
+    // Sponsor wallet (A) — has L-BTC
+    let signer_a = generate_signer();
+    let view_key_a = generate_view_key();
+    let desc_a = format!("ct({view_key_a},elwpkh({}/*))", signer_a.xpub());
+    let mut wallet_a = TestWollet::new(test_client_electrum(&env.electrum_url()), &desc_a);
+
+    // User wallet (B) — will never hold L-BTC
+    let signer_b = generate_signer();
+    let view_key_b = generate_view_key();
+    let desc_b = format!("ct({view_key_b},elwpkh({}/*))", signer_b.xpub());
+    let mut wallet_b = TestWollet::new(test_client_electrum(&env.electrum_url()), &desc_b);
+
+    // Deposit wallet (C) — simulates the partner receiving the asset
+    let view_key_c = generate_view_key();
+    let desc_c = format!(
+        "ct({view_key_c},elwpkh({}/*))",
+        generate_signer().xpub()
+    );
+    let wallet_c = TestWollet::new(test_client_electrum(&env.electrum_url()), &desc_c);
+    let addr_c = wallet_c.address(); // confidential address required by sponsor_prepare
+
+    let lbtc = wallet_a.policy_asset();
+
+    // Fund A with L-BTC
+    wallet_a.fund_btc(&env);
+    wallet_a.sync();
+
+    // Issue an asset and send 10 sat of it to B (simulates DEPIX arriving at the user)
+    let signers_a = [&AnySigner::Software(signer_a.clone())];
+    let (asset, _token) = wallet_a.issueasset(&signers_a, 1_000, 0, None, None);
+    let txid = wallet_a.send_asset(&signers_a, &wallet_b.address(), &asset, None);
+    wait_for_tx(&mut wallet_b.wollet, &mut wallet_b.client, &txid);
+    wallet_b.sync();
+
+    // send_asset sends 10 satoshi
+    assert_eq!(wallet_b.balance(&asset), 10);
+    assert_eq!(wallet_b.balance(&lbtc), 0);
+
+    // A picks a L-BTC UTXO and exposes blinding secrets to B via `utxo_secrets`.
+    let sponsor_utxo = wallet_a
+        .wollet
+        .utxos()
+        .unwrap()
+        .into_iter()
+        .find(|u| u.unblinded.asset == lbtc)
+        .unwrap();
+    let sponsor_outpoint = sponsor_utxo.outpoint;
+
+    let secrets = wallet_a.wollet.utxo_secrets(sponsor_outpoint).unwrap();
+
+    // The outpoint reported by `utxo_secrets` must match what A selected.
+    assert_eq!(secrets.txid, sponsor_outpoint.txid);
+    assert_eq!(secrets.vout, sponsor_outpoint.vout);
+
+    let external_utxo = external_utxo_from_secrets(secrets);
+
+    // Address where A wants the L-BTC change back
+    let addr_a = wallet_a.address();
+
+    // B builds the PSET: asset to C, fee paid by A's UTXO, L-BTC change back to A
+    let mut pset = wallet_b
+        .tx_builder()
+        .add_recipient(&addr_c, 5, asset)
+        .unwrap()
+        .add_external_utxos(vec![external_utxo])
+        .unwrap()
+        .drain_lbtc_wallet()
+        .drain_lbtc_to(addr_a)
+        .finish()
+        .unwrap();
+
+    // Record unsigned txid — must remain stable across signing.
+    let txid_before = pset.extract_tx().unwrap().txid();
+
+    // A validates the PSET and applies `add_details` via `sponsor_prepare`.
+    let prepared = wallet_a
+        .wollet
+        .sponsor_prepare(&mut pset, sponsor_outpoint, &addr_c.to_string())
+        .unwrap();
+
+    // `sponsor_prepare` must echo back the same unsigned txid.
+    assert_eq!(
+        prepared.txid, txid_before,
+        "txid must not change after sponsor_prepare"
+    );
+    assert!(prepared.fee > 0, "fee must be positive");
+
+    // A co-signs its L-BTC input (now enriched with bip32_derivation by add_details)
+    let sigs_a = signer_a.sign(&mut pset).unwrap();
+    assert!(sigs_a > 0, "sponsor signer must produce at least one signature");
+
+    // Signing must not alter the unsigned txid (segwit property)
+    assert_eq!(
+        pset.extract_tx().unwrap().txid(),
+        txid_before,
+        "txid must be stable after sponsor signing"
+    );
+
+    // B signs its asset input
+    let sigs_b = signer_b.sign(&mut pset).unwrap();
+    assert!(sigs_b > 0, "user signer must produce at least one signature");
+
+    assert_eq!(
+        pset.extract_tx().unwrap().txid(),
+        txid_before,
+        "txid must be stable after user signing"
+    );
+
+    // Finalise and broadcast
+    let tx = wallet_b.wollet.finalize(&mut pset).unwrap();
+    let broadcast_txid = wallet_b.client.broadcast(&tx).unwrap();
+    wait_for_tx(&mut wallet_b.wollet, &mut wallet_b.client, &broadcast_txid);
+
+    // B spent its asset; L-BTC balance remains zero (never held any)
+    assert!(wallet_b.balance(&asset) < 10);
+    assert_eq!(wallet_b.balance(&lbtc), 0);
+}
+
+/// Negative: `sponsor_prepare` must reject a PSET where the sponsor input carries
+/// `sighash_type = SIGHASH_NONE`.
+#[test]
+fn test_sponsor_sighash_none_rejected() {
+    use elements::pset::PsbtSighashType;
+
+    let env = TestEnvBuilder::from_env().with_electrum().build();
+
+    let signer_a = generate_signer();
+    let view_key_a = generate_view_key();
+    let desc_a = format!("ct({view_key_a},elwpkh({}/*))", signer_a.xpub());
+    let mut wallet_a = TestWollet::new(test_client_electrum(&env.electrum_url()), &desc_a);
+
+    let signer_b = generate_signer();
+    let view_key_b = generate_view_key();
+    let desc_b = format!("ct({view_key_b},elwpkh({}/*))", signer_b.xpub());
+    let mut wallet_b = TestWollet::new(test_client_electrum(&env.electrum_url()), &desc_b);
+
+    // Confidential deposit address (required by sponsor_prepare)
+    let view_key_c = generate_view_key();
+    let desc_c = format!(
+        "ct({view_key_c},elwpkh({}/*))",
+        generate_signer().xpub()
+    );
+    let wallet_c = TestWollet::new(test_client_electrum(&env.electrum_url()), &desc_c);
+    let addr_c = wallet_c.address();
+
+    let lbtc = wallet_a.policy_asset();
+
+    wallet_a.fund_btc(&env);
+    wallet_a.sync();
+
+    let signers_a = [&AnySigner::Software(signer_a.clone())];
+    let (asset, _token) = wallet_a.issueasset(&signers_a, 1_000, 0, None, None);
+    let txid = wallet_a.send_asset(&signers_a, &wallet_b.address(), &asset, None);
+    wait_for_tx(&mut wallet_b.wollet, &mut wallet_b.client, &txid);
+    wallet_b.sync();
+
+    let sponsor_utxo = wallet_a
+        .wollet
+        .utxos()
+        .unwrap()
+        .into_iter()
+        .find(|u| u.unblinded.asset == lbtc)
+        .unwrap();
+    let sponsor_outpoint = sponsor_utxo.outpoint;
+
+    let secrets = wallet_a.wollet.utxo_secrets(sponsor_outpoint).unwrap();
+    let external_utxo = external_utxo_from_secrets(secrets);
+
+    let addr_a = wallet_a.address();
+
+    let mut pset = wallet_b
+        .tx_builder()
+        .add_recipient(&addr_c, 5, asset)
+        .unwrap()
+        .add_external_utxos(vec![external_utxo])
+        .unwrap()
+        .drain_lbtc_wallet()
+        .drain_lbtc_to(addr_a)
+        .finish()
+        .unwrap();
+
+    // Find the sponsor input index by matching the reserved outpoint.
+    let sponsor_inp_idx = pset
+        .inputs()
+        .iter()
+        .position(|inp| {
+            OutPoint::new(inp.previous_txid, inp.previous_output_index) == sponsor_outpoint
+        })
+        .expect("sponsor input not found in PSET");
+
+    // Inject sighash NONE on the sponsor input — must be rejected.
+    pset.inputs_mut()[sponsor_inp_idx].sighash_type =
+        Some(PsbtSighashType::from_u32(elements::EcdsaSighashType::None.as_u32()));
+
+    let err = wallet_a
+        .wollet
+        .sponsor_prepare(&mut pset, sponsor_outpoint, &addr_c.to_string())
+        .unwrap_err();
+
+    assert!(
+        err.to_string().starts_with("SPONSOR_SIGHASH_NOT_ALL"),
+        "expected SPONSOR_SIGHASH_NOT_ALL, got: {err}"
+    );
+}

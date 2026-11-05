@@ -905,9 +905,33 @@ impl EsploraClient {
 
     /// Read a response body, failing as soon as it exceeds the configured size.
     ///
-    /// The size is counted as the body streams in, `Content-Length` is not trusted.
+    /// Two complementary layers of protection are applied:
+    ///
+    /// 1. **Early-reject by declared `Content-Length`**: if the server announces a
+    ///    `Content-Length` that already exceeds the limit we reject immediately without
+    ///    reading any bytes.  This covers the common case of an honestly-large response.
+    ///
+    /// 2. **Streaming byte count**: each chunk is counted as it arrives so that
+    ///    responses without a `Content-Length` (chunked / close-delimited) are also
+    ///    bounded.
+    ///
+    /// # Known limitation
+    ///
+    /// A malicious server that announces a *small* `Content-Length` (≤ limit) but
+    /// streams many more bytes is **not** protected here.  Under HTTP/1.1 reqwest/hyper
+    /// truncates the stream at the declared `Content-Length` before exposing it to the
+    /// caller, so the extra bytes never reach this function.  Mitigating this would
+    /// require a lower-level HTTP client or a TLS-layer byte counter, which is out of
+    /// scope for the current implementation.
     async fn read_body(&self, response: Response) -> Result<Vec<u8>, Error> {
         let limit = self.max_response_size;
+        // Early-reject: if Content-Length is declared and already over the limit,
+        // refuse before downloading any bytes.
+        if let Some(cl) = response.content_length() {
+            if cl as usize > limit {
+                return Err(Error::ResponseTooLarge { limit });
+            }
+        }
         let mut body = Vec::new();
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
@@ -1591,6 +1615,434 @@ mod tests {
             client.requests.load(std::sync::atomic::Ordering::Relaxed),
             MAX_RETRIES
         );
+    }
+
+    // ── read_body size cap ────────────────────────────────────────────────────
+
+    /// Body larger than the configured limit → `ResponseTooLarge` with the
+    /// correct limit value.  Central DoS-protection test: if this fails the
+    /// size cap is broken.
+    #[tokio::test]
+    async fn read_body_response_too_large() {
+        // 20-byte body, limit set to 5 bytes.
+        let base = serve("200 OK", "01234567890123456789").await;
+        let client = EsploraClientBuilder::new(&base, Network::Liquid)
+            .max_response_size(5)
+            .build()
+            .unwrap();
+        let txid = elements::Txid::from_str(
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        )
+        .unwrap();
+        let err = client.get_transaction(txid).await.unwrap_err();
+        assert!(
+            matches!(err, crate::Error::ResponseTooLarge { limit: 5 }),
+            "unexpected: {err}"
+        );
+    }
+
+    /// Body smaller than the configured limit → no `ResponseTooLarge`; the
+    /// normal path must not be broken by the size cap.
+    #[tokio::test]
+    async fn read_body_within_limit_ok() {
+        // 2-byte body, limit set to 1 KiB.
+        let base = serve("200 OK", "hi").await;
+        let client = EsploraClientBuilder::new(&base, Network::Liquid)
+            .max_response_size(1024)
+            .build()
+            .unwrap();
+        let txid = elements::Txid::from_str(
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        )
+        .unwrap();
+        let err = client.get_transaction(txid).await.unwrap_err();
+        // The body was read without hitting the size limit.  The decode error
+        // that follows ("hi" is not a valid Transaction) is expected and shows
+        // the body reached the application layer intact.
+        assert!(
+            !matches!(err, crate::Error::ResponseTooLarge { .. }),
+            "body within limit must not trigger ResponseTooLarge, got: {err}"
+        );
+    }
+
+    /// Server sends 2 000 bytes with no `Content-Length` (close-delimited); size
+    /// limit is 100 bytes.  Without a declared `Content-Length` reqwest/hyper reads
+    /// until the connection closes, so `read_body` receives all bytes and must trigger
+    /// `ResponseTooLarge`.
+    ///
+    /// NOTE: a server that announces a *small* `Content-Length` (≤ limit) and then
+    /// streams more bytes is **not** covered by this test — reqwest/hyper truncates
+    /// the stream at the declared value, so the extra bytes never reach `read_body`.
+    /// That remaining gap is documented in the `read_body` doc-comment.
+    #[tokio::test]
+    async fn read_body_ignores_content_length() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf).await;
+            // No Content-Length — connection close is the only body delimiter.
+            // reqwest/hyper will stream all 2 000 bytes to read_body.
+            let actual_body = "A".repeat(2_000);
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{actual_body}"
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+        });
+        let base = format!("http://{addr}");
+
+        let client = EsploraClientBuilder::new(&base, Network::Liquid)
+            .max_response_size(100)
+            .build()
+            .unwrap();
+        let txid = elements::Txid::from_str(
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        )
+        .unwrap();
+        let err = client.get_transaction(txid).await.unwrap_err();
+        assert!(
+            matches!(err, crate::Error::ResponseTooLarge { limit: 100 }),
+            "read_body must count actual streamed bytes and not trust Content-Length; got: {err}"
+        );
+    }
+
+    /// `Content-Length` declarado acima do limite → early-reject com `ResponseTooLarge`
+    /// antes de qualquer leitura do stream (Opção C).  Teste explícito do novo caminho:
+    /// sem ele, remover o early-reject não quebraria nenhum outro teste.
+    #[tokio::test]
+    async fn read_body_early_reject_by_declared_content_length() {
+        // serve() envia Content-Length correto (= body.len()).
+        // body = 50 bytes, limit = 10 → CL (50) > limit (10) → early-reject.
+        let base = serve("200 OK", "A".repeat(50).leak()).await;
+        let client = EsploraClientBuilder::new(&base, Network::Liquid)
+            .max_response_size(10)
+            .build()
+            .unwrap();
+        let txid = elements::Txid::from_str(
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        )
+        .unwrap();
+        let err = client.get_transaction(txid).await.unwrap_err();
+        assert!(
+            matches!(err, crate::Error::ResponseTooLarge { limit: 10 }),
+            "Content-Length > limit deve disparar ResponseTooLarge imediato; got: {err}"
+        );
+    }
+
+    /// `Content-Length` igual ao limite exato → não deve disparar early-reject.
+    /// Verifica que a guarda usa `>` e não `>=`.
+    #[tokio::test]
+    async fn read_body_content_length_exactly_at_limit_passes() {
+        // body = 8 bytes, limit = 8 → CL (8) == limit (8) → sem rejeição por CL.
+        // O decode de "AAAAAAAA" como Transaction vai falhar, mas sem ResponseTooLarge.
+        let base = serve("200 OK", "AAAAAAAA").await;
+        let client = EsploraClientBuilder::new(&base, Network::Liquid)
+            .max_response_size(8)
+            .build()
+            .unwrap();
+        let txid = elements::Txid::from_str(
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        )
+        .unwrap();
+        let err = client.get_transaction(txid).await.unwrap_err();
+        assert!(
+            !matches!(err, crate::Error::ResponseTooLarge { .. }),
+            "Content-Length == limit não deve disparar ResponseTooLarge; got: {err}"
+        );
+    }
+
+    /// Sem `Content-Length`, corpo ≤ limite → streaming encerra normalmente sem
+    /// disparar `ResponseTooLarge`.  Cobre o branch close-delimited que
+    /// `read_body_within_limit_ok` não exercita.
+    #[tokio::test]
+    async fn read_body_no_content_length_body_within_limit() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf).await;
+            // 10 bytes, sem Content-Length — só Connection: close como delimitador.
+            let resp = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nHelloWorld";
+            let _ = sock.write_all(resp.as_bytes()).await;
+        });
+        let base = format!("http://{addr}");
+
+        let client = EsploraClientBuilder::new(&base, Network::Liquid)
+            .max_response_size(1024)
+            .build()
+            .unwrap();
+        let txid = elements::Txid::from_str(
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        )
+        .unwrap();
+        let err = client.get_transaction(txid).await.unwrap_err();
+        // Corpo dentro do limite → não deve disparar ResponseTooLarge.
+        // O erro de decode que se segue é esperado e mostra que o body chegou intacto.
+        assert!(
+            !matches!(err, crate::Error::ResponseTooLarge { .. }),
+            "corpo dentro do limite (sem CL) não deve disparar ResponseTooLarge; got: {err}"
+        );
+    }
+
+    /// `Content-Length: 0` → early-reject não deve disparar (0 ≤ qualquer limit ≥ 1).
+    /// Retorna body vazio; o erro de decode que se segue é esperado.
+    #[tokio::test]
+    async fn read_body_content_length_zero() {
+        // serve() com body vazio envia Content-Length: 0.
+        let base = serve("200 OK", "").await;
+        let client = EsploraClientBuilder::new(&base, Network::Liquid)
+            .max_response_size(10)
+            .build()
+            .unwrap();
+        let txid = elements::Txid::from_str(
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        )
+        .unwrap();
+        let err = client.get_transaction(txid).await.unwrap_err();
+        assert!(
+            !matches!(err, crate::Error::ResponseTooLarge { .. }),
+            "Content-Length: 0 não deve disparar ResponseTooLarge; got: {err}"
+        );
+    }
+
+    /// KNOWN GAP: servidor declara `Content-Length: 10` (≤ limite 100) mas envia
+    /// 2 000 bytes.  reqwest/hyper trunca o stream em 10 bytes → read_body nunca
+    /// vê os bytes extras → ResponseTooLarge NÃO é disparado.
+    ///
+    /// Este teste documenta a limitação descrita na docstring de `read_body`.
+    /// Se passar a falhar, significa que reqwest/hyper mudou de comportamento
+    /// e a proteção melhorou — revisar e possivelmente remover o `// KNOWN GAP`.
+    #[tokio::test]
+    async fn read_body_known_gap_small_content_length_bypasses_protection() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf).await;
+            // KNOWN GAP: anuncia CL=10 (≤ limit 100) mas envia 2 000 bytes.
+            let actual_body = "A".repeat(2_000);
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\n{actual_body}"
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+        });
+        let base = format!("http://{addr}");
+
+        let client = EsploraClientBuilder::new(&base, Network::Liquid)
+            .max_response_size(100)
+            .build()
+            .unwrap();
+        let txid = elements::Txid::from_str(
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        )
+        .unwrap();
+        let err = client.get_transaction(txid).await.unwrap_err();
+        // KNOWN GAP: a proteção NÃO dispara porque hyper truncou o stream em 10 bytes.
+        // O erro observado é de decode (dados insuficientes), não ResponseTooLarge.
+        assert!(
+            !matches!(err, crate::Error::ResponseTooLarge { .. }),
+            "KNOWN GAP: esperado erro de decode (não ResponseTooLarge); got: {err}"
+        );
+    }
+
+    // ── error body size cap ───────────────────────────────────────────────────
+
+    /// Server responds 404 with 10 000-byte body; `error_for_status` must read
+    /// at most 2 000 bytes and truncate the final snippet to ≤ 500 chars.
+    /// Prevents a server from forcing a large error-body download.
+    #[tokio::test]
+    async fn read_error_body_truncated_to_2000_bytes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let body = "A".repeat(10_000);
+                let resp = format!(
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            }
+        });
+        let base = format!("http://{addr}");
+
+        let client = EsploraClientBuilder::new(&base, Network::Liquid)
+            .build()
+            .unwrap();
+        let txid = elements::Txid::from_str(
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        )
+        .unwrap();
+        let err = client.get_transaction(txid).await.unwrap_err();
+
+        // error_for_status reads ≤ 2 000 bytes then truncates to ≤ 500 chars.
+        match err {
+            crate::Error::EsploraHttpError {
+                body: Some(snippet),
+                ..
+            } => {
+                assert!(
+                    snippet.chars().count() <= 500,
+                    "snippet must be ≤ 500 chars, got {}",
+                    snippet.chars().count()
+                );
+                // 10 000 'A's → all 500 chars should be used.
+                assert_eq!(
+                    snippet.chars().count(),
+                    500,
+                    "10 000-byte ASCII body should yield exactly 500-char snippet"
+                );
+            }
+            other => panic!("expected EsploraHttpError with body, got: {other}"),
+        }
+    }
+
+    /// Server responds 500 with 10 000-char ASCII body; `body` field in
+    /// `EsploraHttpError` must contain ≤ 500 chars.
+    #[tokio::test]
+    async fn error_for_status_snippet_truncated_to_500_chars() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let body = "X".repeat(10_000);
+                let resp = format!(
+                    "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            }
+        });
+        let base = format!("http://{addr}");
+
+        let client = EsploraClientBuilder::new(&base, Network::Liquid)
+            .build()
+            .unwrap();
+        let txid = elements::Txid::from_str(
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        )
+        .unwrap();
+        let err = client.get_transaction(txid).await.unwrap_err();
+
+        match err {
+            crate::Error::EsploraHttpError {
+                body: Some(snippet),
+                status: 500,
+                ..
+            } => {
+                assert!(
+                    snippet.chars().count() <= 500,
+                    "snippet must be ≤ 500 chars, got {}",
+                    snippet.chars().count()
+                );
+            }
+            other => panic!("expected EsploraHttpError status=500 with body, got: {other}"),
+        }
+    }
+
+    /// Server responds 500 with empty body → `body` field in `EsploraHttpError`
+    /// must be `None` (documented: `(!snippet.is_empty()).then_some(snippet)`).
+    #[tokio::test]
+    async fn error_for_status_empty_body_is_none() {
+        let base = serve("500 Internal Server Error", "").await;
+        let client = EsploraClientBuilder::new(&base, Network::Liquid)
+            .build()
+            .unwrap();
+        let txid = elements::Txid::from_str(
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        )
+        .unwrap();
+        let err = client.get_transaction(txid).await.unwrap_err();
+
+        match err {
+            crate::Error::EsploraHttpError {
+                body: None,
+                status: 500,
+                ..
+            } => {}
+            other => panic!("expected EsploraHttpError status=500 body=None, got: {other}"),
+        }
+    }
+
+    // ── builder defaults and propagation ─────────────────────────────────────
+
+    /// `EsploraClientBuilder::new()` without calling `.max_response_size()` must
+    /// produce a client with the documented 64 MiB default.
+    #[test]
+    fn esplora_max_response_size_default_64mib() {
+        let client = EsploraClientBuilder::new("http://example.com", Network::Liquid)
+            .build()
+            .unwrap();
+        assert_eq!(client.max_response_size, 64 * 1024 * 1024);
+    }
+
+    /// Server sends bytes that are not valid UTF-8 within the response size
+    /// limit → `read_text` must return `Error::Generic` with a message
+    /// containing "invalid response UTF-8".
+    #[tokio::test]
+    async fn read_text_invalid_utf8_returns_generic_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                // Three bytes that are invalid UTF-8.
+                let body: &[u8] = &[0xFF, 0xFE, 0xFD];
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let mut resp = header.as_bytes().to_vec();
+                resp.extend_from_slice(body);
+                let _ = sock.write_all(&resp).await;
+            }
+        });
+        let base = format!("http://{addr}");
+
+        let mut client = EsploraClientBuilder::new(&base, Network::Liquid)
+            .build()
+            .unwrap();
+        // `tip()` → `last_block_hash()` → `read_text()`, which will fail on the
+        // invalid UTF-8 body before any further parsing.
+        let err = client.tip().await.unwrap_err();
+        match err {
+            crate::Error::Generic(msg) => {
+                assert!(
+                    msg.contains("invalid response UTF-8"),
+                    "expected UTF-8 error message, got: {msg}"
+                );
+            }
+            other => panic!("expected Error::Generic, got: {other}"),
+        }
     }
 
     #[ignore = "requires internet connection and env vars"]

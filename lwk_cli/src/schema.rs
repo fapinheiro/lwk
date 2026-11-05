@@ -59,6 +59,8 @@ impl From<WalletSubCommandsEnum> for Method {
             WalletSubCommandsEnum::TxDetails => Method::WalletTxDetails,
             WalletSubCommandsEnum::SetTxMemo => Method::WalletSetTxMemo,
             WalletSubCommandsEnum::SetAddrMemo => Method::WalletSetAddrMemo,
+            WalletSubCommandsEnum::UtxoSecrets => Method::WalletUtxoSecrets,
+            WalletSubCommandsEnum::SponsorPrepare => Method::WalletSponsorPrepare,
         }
     }
 }

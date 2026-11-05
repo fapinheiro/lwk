@@ -1430,6 +1430,7 @@ fn inner_method_handler(request: Request, state: Arc<Mutex<State>>) -> Result<Re
                     asset_bf: secrets.asset_bf.to_string(),
                     value: secrets.value,
                     value_bf: secrets.value_bf.to_string(),
+                    blinding_key: secrets.blinding_key.display_secret().to_string(),
                     height: secrets.height,
                     max_weight_to_satisfy: secrets.max_weight_to_satisfy as u64,
                     is_segwit: secrets.is_segwit,

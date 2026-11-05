@@ -176,6 +176,8 @@ pub enum WalletSubCommandsEnum {
     TxDetails,
     SetTxMemo,
     SetAddrMemo,
+    UtxoSecrets,
+    SponsorPrepare,
 }
 
 #[derive(Debug, Args)]
@@ -770,6 +772,44 @@ pub enum WalletCommand {
         /// Transaction ID to filter for
         #[arg(short, long)]
         txid: Option<String>,
+    },
+
+    /// Return blinding secrets for a specific unspent UTXO (FeeSponsor)
+    UtxoSecrets {
+        /// Wallet name (sponsor wallet)
+        #[arg(short, long, env)]
+        wallet: String,
+
+        /// Transaction ID of the UTXO
+        #[arg(short, long)]
+        txid: String,
+
+        /// Output index of the UTXO
+        #[arg(short, long)]
+        vout: u32,
+    },
+
+    /// Validate a sponsor PSET and apply add_details (FeeSponsor)
+    SponsorPrepare {
+        /// Wallet name (sponsor wallet)
+        #[arg(short, long, env)]
+        wallet: String,
+
+        /// PSET in base64 format
+        #[arg(short, long)]
+        pset: String,
+
+        /// Transaction ID of the sponsor UTXO
+        #[arg(short, long)]
+        txid: String,
+
+        /// Output index of the sponsor UTXO
+        #[arg(short, long)]
+        vout: u32,
+
+        /// Deposit address (confidential address of the partner/recipient)
+        #[arg(short, long)]
+        deposit_address: String,
     },
 }
 

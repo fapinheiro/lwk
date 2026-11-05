@@ -424,6 +424,20 @@ pub fn inner_main(args: args::Cli) -> anyhow::Result<Value> {
                 let r = client.wallet_dump_unblinded(wallet, txid)?;
                 serde_json::to_value(r)?
             }
+            WalletCommand::UtxoSecrets { wallet, txid, vout } => {
+                let r = client.wallet_utxo_secrets(wallet, txid, vout)?;
+                serde_json::to_value(r)?
+            }
+            WalletCommand::SponsorPrepare {
+                wallet,
+                pset,
+                txid,
+                vout,
+                deposit_address,
+            } => {
+                let r = client.wallet_sponsor_prepare(wallet, pset, txid, vout, deposit_address)?;
+                serde_json::to_value(r)?
+            }
         },
         CliCommand::Liquidex(a) => match a.command {
             LiquidexCommand::Make {
