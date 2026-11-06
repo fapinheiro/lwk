@@ -1,0 +1,24 @@
+{
+  "balance": {
+    "5ac9f65c0efcc4775e0baec4ec03abdde22473cd3cf33c0419ca290e0751b225": -40
+  },
+  "fees": {
+    "5ac9f65c0efcc4775e0baec4ec03abdde22473cd3cf33c0419ca290e0751b225": 40
+  },
+  "has_signatures_from": [
+    {
+      "fingerprint": "80c1afa5",
+      "name": "sponsor"
+    }
+  ],
+  "issuances": [],
+  "missing_signatures_from": [
+    {
+      "fingerprint": "5fad0a27",
+      "name": "user"
+    }
+  ],
+  "reissuances": [],
+  "txid": "790993af07795ff27f7675bfb37d02b5f787fcafd2d682fd8de2cb4f0d48a573",
+  "warnings": ""
+}

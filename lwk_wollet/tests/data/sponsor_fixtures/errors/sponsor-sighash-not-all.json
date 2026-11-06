@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": -32603,
+    "message": "SPONSOR_SIGHASH_NOT_ALL: sighash type of the sponsor input is not SIGHASH_ALL"
+  }
+}

@@ -1,0 +1,26 @@
+[
+  {
+    "blinding_key_matches": true,
+    "index": 0,
+    "kind": "Deposit",
+    "script_pubkey": "00149d0fb7981cb0b5717fcaa15620bd9784e349d33e"
+  },
+  {
+    "blinding_key_matches": null,
+    "index": 1,
+    "kind": "Other",
+    "script_pubkey": "00146a6465c66d922439880b749b5fab8e882bb65236"
+  },
+  {
+    "blinding_key_matches": null,
+    "index": 2,
+    "kind": "Mine",
+    "script_pubkey": "001464c8998cd08e5eb97eee4b604977640d760d183d"
+  },
+  {
+    "blinding_key_matches": null,
+    "index": 3,
+    "kind": "Fee",
+    "script_pubkey": ""
+  }
+]
