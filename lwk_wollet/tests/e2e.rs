@@ -18,6 +18,7 @@ mod tx_details;
 mod txs_store;
 #[cfg(feature = "esplora")]
 mod utxo_only;
+mod generate_sponsor_fixtures;
 
 use crate::test_jade::jade_setup;
 use clients::blocking::{self, BlockchainBackend};

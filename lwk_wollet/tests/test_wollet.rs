@@ -490,7 +490,7 @@ impl<C: BlockchainBackend> TestWollet<C> {
         assert_eq!(asset, issuance.asset().unwrap());
         assert_eq!(token, issuance.token().unwrap());
         assert_eq!(satoshi_asset, issuance.asset_satoshi().unwrap_or(0));
-        assert_eq!(satoshi_token, issuance.token_satoshi().unwrap());
+        assert_eq!(satoshi_token, issuance.token_satoshi().unwrap_or(0));
         let fee = details.balance.fees_in(&self.policy_asset()) as i64;
         assert!(fee > 0);
         assert_eq!(
