@@ -26,57 +26,46 @@ LWK is a Rust workspace containing libraries for Liquid wallets. It consists of 
 
 ## Ambiente de desenvolvimento
 
-**Cargo NÃO está instalado localmente nesta máquina.** Todos os builds e testes devem ser executados via Docker:
-
-```bash
-# Compilar e rodar testes de um crate específico via Docker
-docker run --rm -v "$(pwd)":/workspace -w /workspace \
-  lwk-server:dev-builder /root/.cargo/bin/cargo test -p lwk_wollet --lib
-
-# Para testes de integração (requerem containers adicionais):
-docker run --rm -v "$(pwd)":/workspace -w /workspace \
-  lwk-server:dev-builder /root/.cargo/bin/cargo test -p lwk_wollet
-```
+**Cargo NÃO está instalado localmente nesta máquina.** Todos os builds e testes devem ser executados via Docker usando os scripts `./build.sh` e `./test.sh`.
 
 Nunca executar `cargo` diretamente no shell — o binário não existe no PATH.
 
 ## Build Commands
 
 ```bash
-# Build the entire workspace
-cargo -q build
-
-# Build specific crate
-cargo -q build -p lwk_wollet
-
-# Cross-compile for WASM
-cargo -q check --target wasm32-unknown-unknown -p lwk_wollet
+# Buildar a imagem Docker de desenvolvimento (necessário antes de rodar testes)
+./build.sh --version <ver>           # ex: ./build.sh --version 1.0.0
+./build.sh --version <ver> --override  # sobrescreve imagem existente
 ```
+
+O Dockerfile usado é `context/Dockerfile`. A imagem gerada é `lwk-server:dev-builder-<ver>`.
 
 ## Test Commands
 
-> **IMPORTANTE:** `cargo` não está no PATH local. SEMPRE usar Docker para rodar testes.
+> **IMPORTANTE:** `cargo` não está no PATH local. SEMPRE usar `./test.sh` para rodar testes.
 
 ```bash
-# Run unit tests for a specific package (fast, no external deps)
+# Rodar testes unitários + gerar fixtures
+./test.sh --build-version <ver>
+
+# Rodar apenas geração de fixtures (pula unit tests)
+./test.sh --build-version <ver> --fixtures-only
+```
+
+Para rodar um teste específico diretamente via Docker (ex: durante desenvolvimento):
+
+```bash
+# Run unit tests for a specific package
 docker run --rm -v "$(pwd)":/workspace -w /workspace \
-  lwk-server:dev-builder /root/.cargo/bin/cargo test -p lwk_wollet --lib
+  lwk-server:dev-builder-<ver> /root/.cargo/bin/cargo test -p lwk_wollet --lib
 
 # Run a single test by name
 docker run --rm -v "$(pwd)":/workspace -w /workspace \
-  lwk-server:dev-builder /root/.cargo/bin/cargo test -p lwk_wollet --lib test_name_here
-
-# Run all tests for a package (includes integration tests)
-docker run --rm -v "$(pwd)":/workspace -w /workspace \
-  lwk-server:dev-builder /root/.cargo/bin/cargo test -p lwk_wollet
-
-# Run unit tests for all packages
-docker run --rm -v "$(pwd)":/workspace -w /workspace \
-  lwk-server:dev-builder /root/.cargo/bin/cargo test --lib
+  lwk-server:dev-builder-<ver> /root/.cargo/bin/cargo test -p lwk_wollet --lib test_name_here
 
 # Build tests without running
 docker run --rm -v "$(pwd)":/workspace -w /workspace \
-  lwk-server:dev-builder /root/.cargo/bin/cargo test --no-run
+  lwk-server:dev-builder-<ver> /root/.cargo/bin/cargo test --no-run
 ```
 
 ## Lint Commands
