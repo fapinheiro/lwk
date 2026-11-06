@@ -79,7 +79,7 @@ pub struct SponsorOutput {
 }
 
 /// Classification of a PSET output from the sponsor's perspective.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub enum SponsorOutputKind {
     /// Output with an empty script pubkey (network fee).
     Fee,
@@ -242,15 +242,21 @@ impl Wollet {
             }
 
             // Rule 4: witness_utxo must be present and match the actual TxOut.
+            // Note: TxBuilder strips the output witness (rangeproof + surjection_proof)
+            // from witness_utxo (see tx_builder.rs:127), so we must clear the witness
+            // on the cached TxOut before comparing.
             let actual_txout = {
                 let tx = self
                     .cache
                     .tx(&outpoint.txid)
                     .ok_or(Error::MissingTransaction)?;
-                tx.output
+                let mut txout = tx
+                    .output
                     .get(outpoint.vout as usize)
                     .ok_or(Error::MissingVout)?
-                    .clone()
+                    .clone();
+                txout.witness = elements::TxOutWitness::default();
+                txout
             };
             match &sponsor_inp.witness_utxo {
                 Some(w) if *w == actual_txout => {}
